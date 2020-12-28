@@ -1,0 +1,290 @@
+using System;
+using FunctionalProgramming.Basics;
+using FunctionalProgramming.Monad;
+using FunctionalProgramming.Monad.Outlaws;
+using FunctionalProgramming.Monad.Transformer;
+
+namespace CoinToss
+{
+    public abstract class Face
+    {
+        public abstract T Match<T>(Func<T> head, Func<T> tail);
+    }
+
+    public sealed class Head : Face
+    {
+        public static readonly Head Only = new Head();
+
+        private Head()
+        {
+        }
+
+        public override T Match<T>(Func<T> head, Func<T> tail)
+        {
+            return head();
+        }
+
+        public override string ToString()
+        {
+            return "Head";
+        }
+    }
+
+    public sealed class Tail : Face
+    {
+        public static readonly Tail Only = new Tail();
+
+        public Tail()
+        {
+        }
+
+        public override T Match<T>(Func<T> head, Func<T> tail)
+        {
+            return tail();
+        }
+
+        public override string ToString()
+        {
+            return "Tail";
+        }
+    }
+
+    public abstract class Command
+    {
+        public abstract T Match<T>(Func<T> playAgain, Func<T> enough);
+    }
+
+    public sealed class PlayAgain : Command
+    {
+        public static readonly PlayAgain Only = new PlayAgain();
+
+        private PlayAgain()
+        {
+            
+        }
+
+        public override T Match<T>(Func<T> playAgain, Func<T> enough)
+        {
+            return playAgain();
+        }
+    }
+
+    public sealed class Enough : Command
+    {
+        public static readonly Enough Only = new Enough();
+
+        private Enough()
+        {
+        }
+
+        public override T Match<T>(Func<T> playAgain, Func<T> enough)
+        {
+            return enough();
+        }
+    }
+
+    public sealed class Player
+    {
+        public static Lens<Player, string> Name = new Lens<Player, string>((p, n) => p.Copy(name: n), p => p._name); 
+        public static Lens<Player, int> Bank = new Lens<Player, int>((p, b) => p.Copy(bank: b), p => p._bank);
+
+        private readonly string _name;
+        private readonly int _bank;
+
+        public Player(String name, int bank)
+        {
+            _name = name;
+            _bank = bank;
+        }
+
+        public Player Copy(string name = null, int? bank = null)
+        {
+            return new Player(
+                name: name ?? _name,
+                bank: bank ?? _bank);
+        }
+    }
+
+    public class Program
+    {
+        private static readonly Random rng = new Random();
+
+        public static Io<int> RandomInt()
+        {
+            return Io.Apply(() => rng.Next());
+        }
+
+        public static Io<Unit> Print(object o)
+        {
+            return Io.Apply(() => Console.Write(o));
+        }
+
+        public static Io<Unit> Print(string formatString, params object[] values)
+        {
+            return Io.Apply(() => Console.Write(formatString, values));
+        }
+
+        public static Io<Unit> PrintLine(object o)
+        {
+            return Io.Apply(() => Console.WriteLine(o));
+        }
+
+        public static Io<Unit> PrintLine(string formatString, params object[] values)
+        {
+            return Io.Apply(() => Console.WriteLine(formatString, values));
+        }
+
+        public static Io<string> GetLine()
+        {
+            return Io.Apply(() => Console.ReadLine());
+        }
+
+        static void Main(string[] args)
+        {
+            IoMain().UnsafePerformIo();
+        }
+
+        static Io<Unit> IoMain()
+        {
+            return
+                from username in GetUserName()
+                from game in GameLoop()
+                select game.Eval(new Player(username, 1000));
+        }
+
+        static Io<string> GetUserName()
+        {
+            return
+                from _1 in Print("What is your name? ")
+                from username in GetLine()
+                select username;
+        }
+
+        static Io<State<Player, Unit>> GameLoop()
+        {
+            return
+                (from wager in Wager().ToIoState()
+                 from playerGuess in GetPlayerGuess().ToIoState<Player, Face>()
+                 from dealerFlip in GetDealerFlip().ToIoState<Player, Face>()
+                 from _1 in PrintLine("You guessed {0} and the dealer flipped {1}", playerGuess, dealerFlip).ToIoState<Player, Unit>()
+                 from _2 in BasicFunctions.If(playerGuess == dealerFlip, () => Win(wager), () => Lose(wager)).ToIoState()
+                 from bank in Player.Bank.GetS().ToIoState()
+                 from command in GetPlayerCommand().ToIoState<Player, Command>()
+                 from _3 in command.Match(
+                    playAgain: () => GameLoop().ToIoState(),
+                    enough: () => PrintLine("Thanks for playing. You ended with ${0}.", bank).ToIoState<Player, Unit>())
+                 select _3)
+                .Out();
+        }
+
+        static Io<Command> GetPlayerCommand()
+        {
+            return 
+                (from _1 in Print("Wanna try your luck (A)gain? Or have you had (E)nough? ").ToIoMaybe()
+                 from commandString in GetLine().ToIoMaybe()
+                 from command in Io.Apply(() => StringToCommand(commandString)).ToIoMaybe()
+                 select command)
+                .Out()
+                .SelectMany(maybeCommand => maybeCommand.Select(command => Io.Apply(() => command))
+                    .GetOrElse(() => from _1 in PrintLine("Please make a valid choice!")
+                                     from command in GetPlayerCommand()
+                                     select command));
+        }
+
+        static IMaybe<Command> StringToCommand(string commandString)
+        {
+            var retval = Maybe.Nothing<Command>();
+            switch (commandString)
+            {
+                case "A":
+                    retval = PlayAgain.Only.ToMaybe();
+                    break;
+                case "E":
+                    retval = Enough.Only.ToMaybe();
+                    break;
+            }
+            return retval;
+        }
+             
+        static Io<State<Player, Unit>> Lose(int wager)
+        {
+            return
+                (from bank in Player.Bank.GetS().ToIoState()
+                 from _1 in PrintLine("Sorry. You lost.").ToIoState<Player, Unit>()
+                 select _1)
+                .Out();            
+        }
+
+        static Io<State<Player, Unit>> Win(int wager)
+        {
+            return 
+                (from bank in Player.Bank.GetS().ToIoState()
+                 from _1 in Player.Bank.SetS(bank + (wager*2)).ToIoState()
+                 from _2 in PrintLine("Congratulations! You won!").ToIoState<Player, Unit>()
+                 select _2)
+                .Out();
+        }
+
+        public static Io<Face> GetDealerFlip()
+        {
+            return
+                from randomNumber in RandomInt()
+                select randomNumber%2 == 0 ? (Face)Head.Only : Tail.Only;
+        }
+
+        public static Io<Face> GetPlayerGuess()
+        {
+            return 
+                (from _1 in Print("Do you want to bet on (H)eads or (T)ails? ")
+                 from guessString in GetLine()
+                 from guess in Io.Apply(() => StringToFace(guessString))
+                 select guess)
+                .SelectMany(maybeGuess => maybeGuess.Select(guess => Io.Apply(() => guess))
+                    .GetOrElse(() => from _1 in Print("You must guess (H)eads or (T)ails!!!")
+                                     from guess in GetPlayerGuess()
+                                     select guess));
+        }
+
+        public static IMaybe<Face> StringToFace(string s)
+        {
+            var retval = Maybe.Nothing<Face>();
+            switch (s)
+            {
+                case "H":
+                    retval = Head.Only.ToMaybe();
+                    break;
+                case "T":
+                    retval = Tail.Only.ToMaybe();
+                    break;
+            }
+            return retval;
+        } 
+
+        static Io<State<Player, int>> Wager()
+        {
+            return
+                (from bank in Player.Bank.GetS().ToIoState()
+                 from name in Player.Name.GetS().ToIoState()
+                 from wager in GetValidWager(name, bank).ToIoState<Player, int>()
+                 from _1 in Player.Bank.SetS(bank - wager).ToIoState()
+                 select wager)
+                .Out();
+        }
+
+        static Io<int> GetValidWager(string name, int bank)
+        {
+            return 
+                (from _1 in Print("{0}, you have ${1} available. How much would you like to wager? ", name, bank).ToIoMaybe()
+                 from wagerString in GetLine().ToIoMaybe()
+                 from wager in Try.Attempt(() => int.Parse(wagerString)).AsMaybe().ToIoMaybe()
+                 from _2 in PrintLine("{0} < {1} ?", wager, bank, wager < bank).ToIoMaybe()
+                 where wager < bank
+                 select wager)
+                .Out()
+                .SelectMany(maybeWager => maybeWager.Select(wager => Io.Apply(() => wager))
+                    .GetOrElse(() => from _1 in PrintLine("The wager you entered is invalid!")
+                                     from wager in GetValidWager(name, bank)
+                                     select wager));
+        }
+    }
+}
